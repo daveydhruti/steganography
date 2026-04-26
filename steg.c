@@ -95,13 +95,17 @@ PPM *read_ppm(const char *filename) {
 }
 
 void encode_bits(Pixel *pixel, unsigned char ch) {
-    pixel->r = (pixel->r & ~0x7) | ((ch >> 5) & 0x7);
+    pixel->r = (pixel->r & ~0x3) ^ (1 << 2) | (((ch >> 5) & 0x3));  
     pixel->g = (pixel->g & ~0x7) | ((ch >> 2) & 0x7);
     pixel->b = (pixel->b & ~0x3) | (ch & 0x3);
 }
 
+int has_marker(Pixel *pixel1, Pixel *pixel2) {
+    return !((pixel1->r >> 2) & 1) == ((pixel2->r >> 2) & 1);
+}
+
 unsigned char decode_bits(Pixel *pixel) {
-    return ((pixel->r & 0x7) << 5) | ((pixel->g & 0x7) << 2) | (pixel->b & 0x3);
+    return (((pixel->r) & 0x3) << 5) | ((pixel->g & 0x7) << 2) | (pixel->b & 0x3);
 }
 
 PPM *copy_ppm(const PPM *img) {
@@ -121,43 +125,84 @@ PPM *copy_ppm(const PPM *img) {
     return copy;
 }
 
+// Fisher-Yates shuffle
+void shuffle_indices(int *indices, int n) {
+    for (int i = n - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int temp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = temp;
+    }
+}
+
+// Comparison function for qsort
+int compare_ints(const void *a, const void *b) {
+    return (*(int *)a - *(int *)b);
+}
+
 PPM *encode(const char *text, const PPM *img) {
-    if (!text || !img || strlen(text0) == 0) {
+    if (!text || !img || strlen(text) == 0) {
         return NULL;
     }
 
     size_t img_size = (size_t)img->width * img->height;
-    if (strlen(text) + 1 > img_size) {
+    size_t text_len = strlen(text) + 1;  // +1 for null terminator
+    if (text_len > img_size) {
         fprintf(stderr, "Error: The message is too long to be encoded. Try with less than %zu characters.\n", img_size);
         return NULL;
     }
 
     PPM *encoded_img = copy_ppm(img);
 
-    int i = 0;
-    while (text[i] != '\0') {
-        encode_bits(encoded_img->pixels[i], text[i]);
-        i++;
+    int *indices = malloc(img_size * sizeof(int));
+    for (int i = 0; i < img_size; i++) {
+        indices[i] = i;
     }
-    encode_bits(encoded_img->pixels[i], '\0');
+    shuffle_indices(indices, img_size);
 
+    int *selected = malloc(text_len * sizeof(int));
+    for (int i = 0; i < text_len; i++) {
+        selected[i] = indices[i];
+    }
+    qsort(selected, text_len, sizeof(int), compare_ints);
+
+    for (int i = 0; i < text_len; i++) {
+        encode_bits(encoded_img->pixels[selected[i]], text[i]);
+    }
+
+    free(indices);
+    free(selected);
     return encoded_img;
 }
 
-char *decode(const PPM *encoded_img) {
-    if (!encoded_img) {
+char *decode(const PPM *original_img, const PPM *encoded_img) {
+    if (!original_img || !encoded_img) {
         return NULL;
     }
 
-    char *text = malloc(encoded_img->width * encoded_img->height + 1);
+    if (original_img->width != encoded_img->width ||
+        original_img->height != encoded_img->height) {
+        fprintf(stderr, "Error: Image dimensions do not match\n");
+        return NULL;
+    }
+
+    size_t img_size = (size_t)original_img->width * original_img->height;
+    char *text = malloc(img_size + 1);
     int k = 0;
 
-    for (int i = 0; i < encoded_img->width * encoded_img->height; i++) {
-        text[k] = decode_bits(encoded_img->pixels[i]);
-        if (text[k] == '\0') {
-            break;
+    for (int i = 0; i < img_size; i++) {
+        if (original_img->pixels[i]->r != encoded_img->pixels[i]->r ||
+            original_img->pixels[i]->g != encoded_img->pixels[i]->g ||
+            original_img->pixels[i]->b != encoded_img->pixels[i]->b) {
+
+            if (has_marker(encoded_img->pixels[i], original_img->pixels[i])) {
+                text[k] = decode_bits(encoded_img->pixels[i]);
+                if (text[k] == '\0') {
+                    break;
+                }
+                k++;
+            }
         }
-        k++;
     }
 
     text[k] = '\0';
@@ -174,9 +219,10 @@ void print_usage(const char *program_name) {
     printf("      <input.ppm>   : Original PPM image file\n");
     printf("      <output.ppm>  : Output PPM image with encoded message\n");
     printf("      <message>     : Message to hide in the image\n\n");
-    printf("  -d, --decode <encoded.ppm>\n");
+    printf("  -d, --decode <original.ppm> <encoded.ppm>\n");
     printf("      Decode a message from a PPM image\n");
-    printf("      <encoded.ppm> : PPM image with hidden message\n");
+    printf("      <original.ppm> : Original PPM image (before encoding)\n");
+    printf("      <encoded.ppm>  : PPM image with hidden message\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -210,13 +256,24 @@ int main(int argc, char *argv[]) {
         write_ppm(argv[3], encoded_img);
 
     } else if (strcmp(argv[1], "-d") == 0 || strcmp(argv[1], "--decode") == 0) {
-        if (argc != 3) {
+        if (argc != 4) {
             printf("Error: Incorrect number of arguments\n");
             return 1;
         }
 
-        PPM *encoded_img = read_ppm(argv[2]);
-        char *text = decode(encoded_img);
+        PPM *original_img = read_ppm(argv[2]);
+        if (original_img == NULL) {
+            fprintf(stderr, "Error reading file %s\n", argv[2]);
+            return 1;
+        }
+
+        PPM *encoded_img = read_ppm(argv[3]);
+        if (encoded_img == NULL) {
+            fprintf(stderr, "Error reading file %s\n", argv[3]);
+            return 1;
+        }
+
+        char *text = decode(original_img, encoded_img);
         printf("Secret: %s\n", text);
 
     } else {
